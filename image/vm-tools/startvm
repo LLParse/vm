@@ -24,6 +24,9 @@ itoa()
 
 # These two variables can be overwritten
 
+: ${IFACE:="ens33"}
+: ${BRIDGE_IFACE:="br0"}
+
 : ${KVM_BLK_OPTS:="-drive file=\$KVM_IMAGE,if=none,id=drive-disk0,format=qcow2 \
 -device virtio-blk-pci,scsi=off,drive=drive-disk0,id=virtio-disk0,bootindex=1"}
 : ${KVM_RAW_BLK_OPTS:="-drive file=\$KVM_IMAGE,if=none,id=drive-disk0,format=raw \
@@ -31,6 +34,7 @@ itoa()
 # TODO: Skip
 #: ${KVM_NET_OPTS:="-netdev bridge,br=\$BRIDGE_IFACE,id=net0 \
 #-device virtio-net-pci,netdev=net0,mac=\$MAC"}
+: ${KVM_NET_OPTS:="-netdev bridge,br=\$BRIDGE_IFACE,id=tap0"}
 
 # For debugging
 if [ "$1" = "bash" ]; then
@@ -87,9 +91,6 @@ KVM_BLK_OPTS=$KVM_BLK_OPTS$extra_kvm_blk_opts
 # 1. Create a bridge named br0
 # 2. Remove IP from eth0, save eth0 MAC, give eth0 a random MAC
 
-IFACE=eth0
-BRIDGE_IFACE=br0
-
 cidr2mask() {
   local i mask=""
   local full_octets=$(($1/8))
@@ -114,6 +115,69 @@ setup_tap() {
     ip link set dev eth0 down
     LAUNCHER="tapclient --"
     KVM_NET_OPTS="-netdev tap,fd=%FD%,id=hostnet0 -device virtio-net-pci,netdev=hostnet0,id=net0,mac=$MAC"
+}
+
+# TODO: network configuration should persist across reboots by managing /etc/network/interfaces
+setup_bridge() {
+  # This is the interface we are bridging
+  target_iface=$1
+  # This is the name of the bridge interface
+  bridge_iface=$2
+
+  # Ensure the target interface exists
+  ifconfig $target_iface &> /dev/null
+  if [ "$?" != "0" ]; then
+    echo "Target interface $target_iface does not exist"
+    exit 1
+  fi
+
+  # Ensure the bridge interface doesn't exist
+  ifconfig $bridge_iface &> /dev/null
+  if [ "$?" == "0" ]; then
+    echo "Bridge interface $bridge_iface already exists."
+    return
+  fi
+
+  # Gather information from the target interface
+  inet4=$(ip addr show dev $target_iface | grep "inet " | awk '{print $2}')
+  default_gw=$(route | grep ^default | awk '{print $2}')
+
+  # Bring the target interface down
+  ip link set dev $target_iface down
+
+  # Create bridge device
+  brctl addbr $bridge_iface
+  if [ "$?" != "0" ]; then
+    echo Error creating bridge_iface device
+    exit 1
+  fi
+
+  # Add the target interface to the bridge
+  brctl addif $bridge_iface $target_iface
+
+  # Put the bridged interface into promiscuous mode
+  ifconfig $target_iface 0.0.0.0 promisc
+
+  # Move the ip address to the bridge
+  ifconfig $bridge_iface $inet4
+
+  # Add default route
+  route add default gw $default_gw
+
+  # https://bugs.launchpad.net/ubuntu/+source/procps/+bug/50093
+  # Disable L2 traffic filtering
+  for f in /proc/sys/net/bridge/*; do
+    # echo "net.bridge.$f=0" >> /etc/sysctl.conf
+    echo 0 > $f
+  done
+  # sysctl -p
+
+  # Allow qemu to use the bridge
+  echo allow $bridge_iface > /etc/qemu/bridge.conf
+
+  # Bring the interfaces up
+  ip link set dev $bridge_iface up
+  ip link set dev $target_iface up
 }
 
 setup_bridge_networking() {
@@ -172,17 +236,10 @@ EOF
     echo allow $BRIDGE_IFACE >  /etc/qemu/bridge.conf
 }
 
-#TODO: Skip
-# need to wait until network is ready
-#ISO=`generate_cloud_drive`
-#if [[ $ISO ]]
-#then
-#	KVM_BLK_OPTS=$KVM_BLK_OPTS" -cdrom $ISO"
-#fi
-
 # TODO: Skip
 # setup_bridge_networking
 
+setup_bridge $IFACE $BRIDGE_IFACE
 
 # If /vm does not exist, we still proceed with running KVM. We just
 # won't get a VNC console socket.
@@ -193,4 +250,4 @@ if [ -d /vm ]; then
     echo VNC server will listen on Unix socket /vm/$DOCKERID/vnc
 fi
 
-exec $LAUNCHER qemu-system-x86_64 -enable-kvm  -vnc 0.0.0.0:1 `eval echo $KVM_BLK_OPTS` `eval echo $KVM_NET_OPTS` -usbdevice tablet $KVM_ARGS
+exec $LAUNCHER qemu-system-x86_64 -enable-kvm  -vnc 0.0.0.0:0 `eval echo $KVM_BLK_OPTS` `eval echo $KVM_NET_OPTS` -usbdevice tablet $KVM_ARGS
