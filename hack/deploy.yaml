@@ -131,7 +131,7 @@ spec:
         imagePullPolicy: Always
         args:
         - -vm
-        - -bridge-iface=eth1
+        - -bridge-iface=ens33
       serviceAccountName: ranchervm-service-account
 ---
 apiVersion: apps/v1beta1
@@ -175,7 +175,7 @@ spec:
     port: 9500
   selector:
     app: ranchervm-backend
-  type: NodePort
+  type: ClusterIP
 ---
 apiVersion: apps/v1beta1
 kind: Deployment
@@ -201,11 +201,8 @@ spec:
             topologyKey: "kubernetes.io/hostname"
       containers:
       - name: ranchervm-frontend
-        image: rancher/vm
+        image: rancher/vm-frontend
         imagePullPolicy: Always
-        env:
-        - name: LONGHORN_MANAGER_IP
-          value: "http://127.0.0.1:9500/v1/"
 ---
 apiVersion: v1
 kind: Service
@@ -241,7 +238,7 @@ spec:
         imagePullPolicy: Always
         command: [ "sh", "-c"]
         args:
-        - exec /vm-controller -ip -nodename ${MY_NODE_NAME} -v 3
+        - exec /ranchervm -ip -nodename ${MY_NODE_NAME} -v 3
         env:
         - name: MY_NODE_NAME
           valueFrom:
